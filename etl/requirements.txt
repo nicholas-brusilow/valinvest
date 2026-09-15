@@ -1,0 +1,6 @@
+yfinance==1.7.0
+pandas==3.0.5
+psycopg[binary]~=3.2
+requests~=2.32
+streamlit==1.63.0
+plotly==7.0.0

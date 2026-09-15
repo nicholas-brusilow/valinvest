@@ -1,0 +1,21 @@
+# Data inputs and outputs (SEC EDGAR, Yahoo, derived CSVs)
+data/
+
+# Runtime logs
+logs/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Environment / secrets
+.env
+.env.*
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,61 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: valinvest
+      POSTGRES_PASSWORD: valinvest
+      POSTGRES_DB: valinvest
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    command: ["postgres", "-c", "synchronous_commit=off", "-c", "shared_buffers=2GB", "-c", "max_wal_size=4GB"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U valinvest -d valinvest"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  etl:
+    build: ./etl
+    image: valinvest-etl
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://valinvest:valinvest@db:5432/valinvest
+      SEC_USER_AGENT: "ValInvest Research research@example.com"
+      EDGAR_ZIP: /work/data/companyfacts.zip
+      TICKER_MAP_URL: https://www.sec.gov/files/company_tickers_exchange.json
+      EDGAR_WORKERS: "10"
+      YF_WORKERS: "8"
+      YF_RATE: "5"
+    volumes:
+      - ./:/work
+    working_dir: /work
+    command: sleep infinity
+
+  dashboard:
+    image: valinvest-etl
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8501:8501"
+    environment:
+      DATABASE_URL: postgresql://valinvest:valinvest@db:5432/valinvest
+    volumes:
+      - ./:/work
+    working_dir: /work
+    command:
+      [
+        "streamlit", "run", "dashboard/app.py",
+        "--server.address=0.0.0.0",
+        "--server.port=8501",
+        "--server.headless=true",
+        "--browser.gatherUsageStats=false",
+        "--server.fileWatcherType=none",
+      ]
+
+volumes:
+  pgdata:

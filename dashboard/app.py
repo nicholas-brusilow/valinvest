@@ -75,9 +75,7 @@ def _fmt_dollar(value: float | None) -> str:
 with st.sidebar:
     st.header("Screening criteria")
 
-    n_stocks = st.slider(
-        "Number of value stocks", min_value=5, max_value=50, value=20, key="n_stocks"
-    )
+    count_placeholder = st.empty()
 
     freq_label = st.radio(
         "Rebalance frequency",
@@ -158,7 +156,6 @@ if mcap_min > mcap_max:
     st.stop()
 
 params = {
-    "n_stocks": int(n_stocks),
     "pe_min": float(pe_range[0]),
     "pe_max": float(pe_range[1]),
     "mcap_min_b": float(mcap_min),
@@ -176,7 +173,9 @@ params = {
 # Load + run
 # --------------------------------------------------------------------------- #
 try:
+    panel = get_panel()
     result = run_cached(tuple(sorted(params.items())))
+    matching_count = backtest.count_matching(panel, params)
 except Exception as exc:  # noqa: BLE001 - surface a friendly message to the user
     st.error(f"Backtest failed: {exc}")
     st.info(
@@ -184,6 +183,13 @@ except Exception as exc:  # noqa: BLE001 - surface a friendly message to the use
         "(run `./run.sh` from the project root)."
     )
     st.stop()
+
+latest_quarter = result.stats.get("end_quarter") or str(panel["quarter"].max())
+count_placeholder.markdown(
+    f"**{matching_count:,} value stock{'s' if matching_count != 1 else ''} matching**\n\n"
+    f"All qualifying names are held equal-weight at each rebalance "
+    f"(count as of {latest_quarter})."
+)
 
 stats = result.stats
 series = result.series
@@ -298,15 +304,7 @@ else:
         }
     )
     st.dataframe(display, hide_index=True, width="stretch")
-    st.caption(
-        f"{len(latest)} holdings selected at the latest rebalance "
-        f"(requested {params['n_stocks']})."
-    )
-    if stats.get("min_holdings", 0) < params["n_stocks"]:
-        st.caption(
-            f"⚠️ Some rebalances held fewer than the requested "
-            f"{params['n_stocks']} names (minimum {stats['min_holdings']})."
-        )
+    st.caption(f"{len(latest)} holdings selected at the latest rebalance.")
 
 # --------------------------------------------------------------------------- #
 # Rebalance history
@@ -342,7 +340,7 @@ with st.expander("Methodology & caveats"):
   are as of t-1, so selection never uses future data (no look-ahead).
 - **Returns:** split-adjusted price appreciation plus cash dividends (as-reported
   XBRL era; data starts ~2009-2010).
-- **Weighting:** equal weight at each rebalance, with drift between rebalances.
+- **Weighting:** equal weight among all names passing the screens at each rebalance, with drift between rebalances.
 - **No frictions:** transaction costs and taxes are ignored.
 - **Benchmark:** SPY is used as the S&P 500 total-return proxy (no index
   membership data; ~0.09%/yr expense drag).

@@ -124,7 +124,7 @@ View non-null coverage: `price` 551,639 (92.05%), `shares outstanding` 263,766,
 │   ├── app.py                # Streamlit UI (controls, equity curve, holdings)
 │   ├── backtest.py           # UI-free engine: panel loader, screen, rebalanced backtest
 │   ├── prepare.py            # builds stock_risk_quarter + value_panel (idempotent, --force)
-│   └── test_backtest.py      # 15 synthetic unit tests (plain-python runner)
+│   └── test_backtest.py      # 19 synthetic unit tests (plain-python runner)
 ├── etl/
 │   ├── Dockerfile            # FROM python:3.13-slim, pip install requirements
 │   ├── requirements.txt      # pinned dependencies
@@ -557,6 +557,13 @@ docker compose down
 # docker compose down -v
 ```
 
+### 7.6 Hosting on Azure (static site + managed PostgreSQL)
+
+A complete deployment guide for running the ETL as a scheduled Azure Container
+Apps job, the database on PostgreSQL Flexible Server, and the dashboard as a
+static SPA (Blob `$web`) backed by a Python Functions API that reuses
+`dashboard/backtest.py`: **[`docs/azure-deploy.md`](docs/azure-deploy.md)**.
+
 ---
 
 ## 8. Validation & known-good anchors
@@ -783,8 +790,9 @@ The view is the intended interface. Natural next steps and their hooks:
 
 An interactive Streamlit dashboard compares a **configurable value portfolio**
 against the **S&P 500 (SPY total return)**, both rebased to $100 at the same
-start date, over the full backtestable window (currently **2010Q1–2026Q2** —
-EDGAR XBRL fundamentals only allow quality screening from ~2010).
+start date, over the full backtestable window (currently **2008Q3–2026Q2**;
+EDGAR XBRL coverage is sparse before ~2010, so the earliest rebalances hold only
+a handful of names).
 
 ```bash
 ./run.sh                     # build if needed → db+etl → ETL only if DB empty →
@@ -805,7 +813,7 @@ start the `dashboard` service on the shared `valinvest-etl` image, port 8501).
 
 | Control | Meaning |
 | --- | --- |
-| Number of value stocks | 5–50 equal-weighted names (fewer if not enough qualify) |
+| Matching count | Read-only live count ("N value stocks matching") of names passing the current filters; there is no top-N cap |
 | Rebalance frequency | Quarterly, Semiannually (calendar Q2/Q4), Annually (Q4) |
 | P/E range | TTM P/E, split-adjusted, positive EPS required |
 | Market cap range | bounds in $B |
@@ -821,7 +829,8 @@ start the `dashboard` service on the shared `valinvest-etl` image, port 8501).
 - **Selection** at rebalance quarter `t` uses only data known by then:
   price(t), TTM EPS over quarters `t-4..t-1` (one-quarter reporting lag, no
   look-ahead), last-known shares as of `≤ t-1`, and trailing 4-quarter
-  dividends. Names are ranked by lowest P/E (tie-break ticker).
+  dividends. All names passing the screens are held, equal-weighted, sorted by
+  lowest P/E then ticker only for deterministic ordering (no top-N cap).
 - **Returns** are price appreciation + dividends:
   `(close_raw_q + SUM(dividend.amount)_q) / close_raw_{q-1} - 1`, i.e. the
   split-adjusted close and split-adjusted cash dividends. The view's as-traded
@@ -838,8 +847,8 @@ start the `dashboard` service on the shared `valinvest-etl` image, port 8501).
 - **Benchmark**: SPY (S&P 500 ETF) total return via the same formula (≈0.09%/yr
   expense drag vs the index). No index-membership or survivorship correction;
   the universe is the SEC-filer/EDGAR ticker set.
-- **Window**: starts at the first calendar rebalance quarter with enough
-  eligible names (2010Q1 for the default screen); the current partial quarter is
+- **Window**: starts at the first calendar rebalance quarter with at least one
+  eligible name (2008Q3 for the default screen); the current partial quarter is
   excluded.
 
 ### 15.3 Derived tables (`sql/dashboard.sql` + `dashboard/prepare.py`)
@@ -849,10 +858,10 @@ start the `dashboard` service on the shared `valinvest-etl` image, port 8501).
 | `stock_risk_quarter` | 551,816 | per (ticker, quarter-end): annualized 252-day volatility, 252-day return, distance from 52-week high (daily closes, corrupt values `≤1e-6`/`≥1e7` masked) |
 | `value_panel` | 607,414 | full featured panel: split-normalized P/E, market cap, dividend yield, TTM metrics, risk columns |
 
-`dashboard/backtest.py` is UI-free and covered by 15 synthetic unit tests:
+`dashboard/backtest.py` is UI-free and covered by 19 synthetic unit tests:
 
 ```bash
-docker compose exec -T etl python dashboard/test_backtest.py   # 15 passed
+docker compose exec -T etl python dashboard/test_backtest.py   # 19 passed
 ```
 
 The Streamlit app (`dashboard/app.py`) only renders; the panel read is cached
@@ -862,11 +871,11 @@ refreshes them after a data reload.
 
 ### 15.4 Reference run (reproducibility anchor)
 
-Default screen with `mcap ≥ $2B`, 20 stocks, quarterly rebalance: **2010Q1 →
-2026Q2, portfolio $319.77 vs S&P 500 $851.63** (CAGR 7.42% vs 14.09%, max
-drawdown −24.8% vs −23.9%). This is what this screen actually returns on this
-data, not investment advice; low-P/E screens are sensitive to the filters and
-the rebalance calendar.
+Default screen with `mcap ≥ $2B`, quarterly rebalance, all qualifying names
+held: **2008Q3 → 2026Q2, portfolio $537.51 vs S&P 500 $889.43** (CAGR 9.94% vs
+13.10%, max drawdown −35.64% vs −30.41%; 71 rebalances, 215 names on average).
+This is what this screen actually returns on this data, not investment advice;
+low-P/E screens are sensitive to the filters and the rebalance calendar.
 
 ---
 

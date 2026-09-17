@@ -149,7 +149,6 @@ def test_price_only_return():
     result = backtest.run_backtest(
         panel(rows),
         {
-            "n_stocks": 1,
             "pe_min": 0.0,
             "pe_max": 15.0,
             "mcap_min_b": 2.0,
@@ -179,7 +178,7 @@ def test_dividend_included():
         rows.append(make_row("SPY", q, 100.0, pe=np.nan))
     result = backtest.run_backtest(
         panel(rows),
-        {"n_stocks": 1, "pe_min": 0.0, "pe_max": 15.0, "freq": "quarterly"},
+        {"pe_min": 0.0, "pe_max": 15.0, "freq": "quarterly"},
     )
     assert approx(result.stats["portfolio_final"], 112.0), result.stats
 
@@ -199,7 +198,6 @@ def test_filters():
     ]
     uni = panel(rows)
     base = {
-        "n_stocks": 10,
         "pe_min": 0.0,
         "pe_max": 15.0,
         "mcap_min_b": 2.0,
@@ -247,7 +245,6 @@ def test_require_pos_eps4():
     assert approx(neg_min, -1.0), neg_min
 
     p = {
-        "n_stocks": 10,
         "pe_min": 0.0,
         "pe_max": 100.0,
         "mcap_min_b": None,
@@ -271,7 +268,7 @@ def test_vol_and_ret_filters():
         make_row("D", "2020Q1", 100.0, vol=0.3, ret=0.6),
     ]
     uni = panel(rows)
-    base = {"n_stocks": 10, "pe_min": 0.0, "pe_max": 15.0}
+    base = {"pe_min": 0.0, "pe_max": 15.0}
     sel = backtest.select_holdings(uni, {**base, "vol_max": 0.5})
     assert set(sel["ticker"]) == {"A", "D"}, sel["ticker"].tolist()
     assert "C" not in set(sel["ticker"])  # NaN vol excluded when a cap is set
@@ -284,27 +281,30 @@ def test_vol_and_ret_filters():
 
 
 # --------------------------------------------------------------------------- #
-# 6. top-N by lowest PE, deterministic tie-break
+# 6. all eligible names are held equal-weighted (no top-N)
 # --------------------------------------------------------------------------- #
 
 
-def test_top_n_tie_break():
+def test_all_eligible_equal_weight():
     rows = [
         make_row("AAA", "2020Q1", 100.0, pe=5.0),
         make_row("BBB", "2020Q1", 100.0, pe=5.0),
         make_row("CCC", "2020Q1", 100.0, pe=3.0),
         make_row("DDD", "2020Q1", 100.0, pe=3.0),
+        make_row("HIGHPE", "2020Q1", 100.0, pe=50.0),
     ]
     uni = panel(rows)
-    sel = backtest.select_holdings(
+    sel = backtest.select_holdings(uni, {"pe_min": 0.0, "pe_max": 15.0})
+    assert sel["ticker"].tolist() == ["CCC", "DDD", "AAA", "BBB"], sel["ticker"].tolist()
+    assert all(approx(w, 0.25) for w in sel["weight"]), sel["weight"].tolist()
+    assert "HIGHPE" not in set(sel["ticker"])
+    # A stale ``n_stocks`` key is ignored: all eligible names are still held.
+    stale = backtest.select_holdings(
         uni, {"n_stocks": 2, "pe_min": 0.0, "pe_max": 15.0}
     )
-    assert sel["ticker"].tolist() == ["CCC", "DDD"], sel["ticker"].tolist()
-    sel3 = backtest.select_holdings(
-        uni, {"n_stocks": 3, "pe_min": 0.0, "pe_max": 15.0}
-    )
-    assert sel3["ticker"].tolist() == ["CCC", "DDD", "AAA"], sel3["ticker"].tolist()
-    assert all(approx(w, 1 / 3) for w in sel3["weight"])
+    assert stale["ticker"].tolist() == ["CCC", "DDD", "AAA", "BBB"], stale[
+        "ticker"
+    ].tolist()
 
 
 # --------------------------------------------------------------------------- #
@@ -315,7 +315,7 @@ def test_top_n_tie_break():
 def test_rebalance_frequencies():
     quarters = [f"2020Q{i}" for i in (1, 2, 3, 4)] + [f"2021Q{i}" for i in (1, 2, 3, 4)]
     rows = [make_row("AAA", q, 100.0, pe=5.0) for q in quarters]
-    base = {"n_stocks": 1, "pe_min": 0.0, "pe_max": 15.0}
+    base = {"pe_min": 0.0, "pe_max": 15.0}
 
     ann = backtest.run_backtest(panel(rows), {**base, "freq": "annual"})
     assert ann.holdings["rebalance_quarter"].tolist() == ["2020Q4"], ann.holdings[
@@ -355,7 +355,7 @@ def test_weight_drift():
         rows.append(make_row("BBB", q, b_px[q], pe=6.0))
     result = backtest.run_backtest(
         panel(rows),
-        {"n_stocks": 2, "pe_min": 0.0, "pe_max": 15.0, "freq": "quarterly"},
+        {"pe_min": 0.0, "pe_max": 15.0, "freq": "quarterly"},
     )
     # Period 1: (2.0 + 1.0)/2 = 1.5 -> 150.  Weights drift to 2/3, 1/3.
     # Period 2: both flat -> value stays 150.
@@ -416,7 +416,7 @@ def test_benchmark_rebase():
         rows.append(make_row("AAA", q, 100.0, pe=5.0))
         rows.append(make_row("SPY", q, 200.0, pe=np.nan))
     result = backtest.run_backtest(
-        panel(rows), {"n_stocks": 1, "pe_min": 0.0, "pe_max": 15.0}
+        panel(rows), {"pe_min": 0.0, "pe_max": 15.0}
     )
     first = result.series.iloc[0]
     assert approx(first["portfolio"], 100.0), first.to_dict()
@@ -446,7 +446,7 @@ def test_delist_modes():
         make_row("XYZ", "2020Q2", np.nan, pe=np.nan),
         make_row("XYZ", "2020Q3", 100.0, pe=5.0),
     ]
-    params = {"n_stocks": 1, "pe_min": 0.0, "pe_max": 15.0, "freq": "quarterly"}
+    params = {"pe_min": 0.0, "pe_max": 15.0, "freq": "quarterly"}
     carry = backtest.run_backtest(panel(rows), {**params, "delist_mode": "carry"})
     assert approx(carry.stats["portfolio_final"], 100.0), carry.stats
     writeoff = backtest.run_backtest(panel(rows), {**params, "delist_mode": "writeoff"})
@@ -466,7 +466,7 @@ def test_holdings_mktcap_column():
         rows.append(make_row("AAA", q, px[q], pe=5.0, mktcap=10e9))
         rows.append(make_row("SPY", q, 100.0, pe=np.nan))
     result = backtest.run_backtest(
-        panel(rows), {"n_stocks": 1, "pe_min": 0.0, "pe_max": 15.0}
+        panel(rows), {"pe_min": 0.0, "pe_max": 15.0}
     )
     assert "mktcap_b" in result.holdings.columns, result.holdings.columns.tolist()
     assert not result.holdings["mktcap_b"].isna().all(), result.holdings
@@ -517,6 +517,95 @@ def test_value_panel_columns():
 
 
 # --------------------------------------------------------------------------- #
+# 16. count_matching helper
+# --------------------------------------------------------------------------- #
+
+
+def test_count_matching():
+    rows = [
+        make_row("AAA", "2020Q1", 100.0, pe=5.0),
+        make_row("BBB", "2020Q1", 100.0, pe=12.0),
+        make_row("CCC", "2020Q1", 100.0, pe=20.0),
+        make_row("AAA", "2020Q2", 100.0, pe=5.0),
+        make_row("BBB", "2020Q2", 100.0, pe=12.0),
+        make_row("CCC", "2020Q2", 100.0, pe=20.0),
+    ]
+    uni = panel(rows)
+    filt = {"pe_min": 0.0, "pe_max": 15.0}
+    assert backtest.count_matching(uni, filt) == 2
+    assert backtest.count_matching(uni, filt, quarter="2020Q1") == 2
+    assert backtest.count_matching(uni, {"pe_min": 0.0, "pe_max": 10.0}) == 1
+    assert backtest.count_matching(uni, filt, quarter="1990Q1") == 0
+    assert backtest.count_matching(panel([]), filt) == 0
+    nan_idx = pd.DataFrame({"qidx": [np.nan, np.nan]})
+    assert backtest.count_matching(nan_idx, filt) == 0
+
+
+# --------------------------------------------------------------------------- #
+# 17. start quarter is the first with any eligible name
+# --------------------------------------------------------------------------- #
+
+
+def test_start_quarter_first_eligible():
+    rows = []
+    px = {"2020Q1": 100.0, "2020Q2": 110.0, "2020Q3": 121.0, "2020Q4": 133.1}
+    for q in ("2020Q1", "2020Q2", "2020Q3", "2020Q4"):
+        pe = np.nan if q in ("2020Q1", "2020Q2") else 5.0
+        rows.append(make_row("AAA", q, px[q], pe=pe))
+        rows.append(make_row("SPY", q, 100.0, pe=np.nan))
+    result = backtest.run_backtest(
+        panel(rows), {"pe_min": 0.0, "pe_max": 15.0, "freq": "quarterly"}
+    )
+    assert result.stats["settled"] is True, result.stats
+    assert result.stats["start_quarter"] == "2020Q3", result.stats
+    assert result.holdings["rebalance_quarter"].tolist() == ["2020Q3"], result.holdings[
+        "rebalance_quarter"
+    ].tolist()
+
+
+# --------------------------------------------------------------------------- #
+# 18. no eligible holdings anywhere -> unsettled
+# --------------------------------------------------------------------------- #
+
+
+def test_no_eligible_returns_unsettled():
+    rows = []
+    for q in ("2020Q1", "2020Q2"):
+        rows.append(make_row("AAA", q, 100.0, pe=np.nan))
+        rows.append(make_row("SPY", q, 100.0, pe=np.nan))
+    result = backtest.run_backtest(
+        panel(rows), {"pe_min": 0.0, "pe_max": 15.0, "freq": "quarterly"}
+    )
+    assert result.stats["settled"] is False, result.stats
+    assert result.stats["start_quarter"] is None, result.stats
+    assert result.series.empty, result.series
+    assert result.holdings.empty, result.holdings
+    assert "message" in result.stats, result.stats
+
+
+# --------------------------------------------------------------------------- #
+# 19. eligible only in the final quarter -> no evaluable period
+# --------------------------------------------------------------------------- #
+
+
+def test_single_point_guard():
+    rows = [
+        make_row("AAA", "2020Q1", 100.0, pe=np.nan),
+        make_row("AAA", "2020Q2", 110.0, pe=np.nan),
+        make_row("AAA", "2020Q3", 121.0, pe=5.0),
+        make_row("SPY", "2020Q1", 100.0, pe=np.nan),
+        make_row("SPY", "2020Q2", 100.0, pe=np.nan),
+        make_row("SPY", "2020Q3", 100.0, pe=np.nan),
+    ]
+    result = backtest.run_backtest(
+        panel(rows), {"pe_min": 0.0, "pe_max": 15.0, "freq": "quarterly"}
+    )
+    assert result.stats["settled"] is False, result.stats
+    assert result.series.empty, result.series
+    assert "message" in result.stats, result.stats
+
+
+# --------------------------------------------------------------------------- #
 
 TESTS = [
     ("price_only_return", test_price_only_return),
@@ -524,7 +613,7 @@ TESTS = [
     ("filters", test_filters),
     ("require_pos_eps4", test_require_pos_eps4),
     ("vol_and_ret_filters", test_vol_and_ret_filters),
-    ("top_n_tie_break", test_top_n_tie_break),
+    ("all_eligible_equal_weight", test_all_eligible_equal_weight),
     ("rebalance_frequencies", test_rebalance_frequencies),
     ("weight_drift", test_weight_drift),
     ("split_normalization", test_split_normalization),
@@ -534,6 +623,10 @@ TESTS = [
     ("delist_modes", test_delist_modes),
     ("holdings_mktcap_column", test_holdings_mktcap_column),
     ("value_panel_columns", test_value_panel_columns),
+    ("count_matching", test_count_matching),
+    ("start_quarter_first_eligible", test_start_quarter_first_eligible),
+    ("no_eligible_returns_unsettled", test_no_eligible_returns_unsettled),
+    ("single_point_guard", test_single_point_guard),
 ]
 
 

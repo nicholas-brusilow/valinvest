@@ -416,23 +416,44 @@ def _eligible(universe: pd.DataFrame, params: dict) -> pd.DataFrame:
 
 
 def select_holdings(universe: pd.DataFrame, params: dict) -> pd.DataFrame:
-    """Select the lowest-PE qualifying names, equal-weighted.
+    """Select every qualifying name, equal-weighted.
 
-    Sorting is by ``pe`` ascending then ``ticker`` ascending (deterministic).
+    All rows passing the screens are held (no top-N cap).  Sorting is by ``pe``
+    ascending then ``ticker`` ascending purely for deterministic output order.
     Returns an empty frame with the right columns when nothing qualifies.
     """
-    n_stocks = int(params.get("n_stocks", 20))
     eligible = _eligible(universe, params)
     if len(eligible) == 0:
         return eligible.assign(weight=pd.Series(dtype="float64"))[
             [c for c in _HOLDING_COLUMNS if c in eligible.columns or c == "weight"]
         ]
 
-    selected = (
-        eligible.sort_values(["pe", "ticker"], kind="mergesort").head(n_stocks).copy()
-    )
+    selected = eligible.sort_values(["pe", "ticker"], kind="mergesort").copy()
     selected["weight"] = 1.0 / len(selected)
     return selected
+
+
+def count_matching(
+    panel: pd.DataFrame, params: dict, quarter: str | None = None
+) -> int:
+    """Number of ``_eligible`` rows in ``panel`` at ``quarter`` (default: max qidx).
+
+    Pure logic, no Streamlit: the dashboard uses it to show how many names pass
+    the current screens at the most recent quarter in the panel.
+    """
+    if panel is None or len(panel) == 0:
+        return 0
+    if "qidx" not in panel.columns:
+        if "quarter" not in panel.columns:
+            return 0
+        panel = panel.assign(qidx=panel["quarter"].map(qidx))
+    if quarter is not None:
+        q = qidx(quarter)
+    else:
+        q = panel["qidx"].max()
+        if pd.isna(q):
+            return 0
+    return int(len(_eligible(panel.loc[panel["qidx"] == q], params)))
 
 
 # --------------------------------------------------------------------------- #
@@ -446,7 +467,6 @@ FREQ_MODS = {
 }
 
 DEFAULT_PARAMS = {
-    "n_stocks": 20,
     "pe_min": 0.0,
     "pe_max": 15.0,
     "mcap_min_b": 0.5,
@@ -566,7 +586,6 @@ def run_backtest(panel: pd.DataFrame, params: dict) -> BacktestResult:
             settled=False, message="panel has fewer than two quarters"
         )
 
-    n_stocks = int(p["n_stocks"])
     freq = p["freq"] if p["freq"] in FREQ_MODS else "quarterly"
     mods = FREQ_MODS[freq]
     start_year = p["start_year"]
@@ -578,19 +597,15 @@ def run_backtest(panel: pd.DataFrame, params: dict) -> BacktestResult:
     if not grid:
         return _empty_result(settled=False, message="no rebalance dates")
 
-    counts = {
-        q: len(_eligible(panel.loc[panel["qidx"] == q], p)) for q in grid
-    }
-    settled = max(counts.values(), default=0) >= n_stocks
-    threshold = n_stocks if settled else 1
-
-    start_q = next((q for q in grid if counts.get(q, 0) >= threshold), None)
+    counts = {q: len(_eligible(panel.loc[panel["qidx"] == q], p)) for q in grid}
+    start_q = next((q for q in grid if counts.get(q, 0) >= 1), None)
     if start_q is None:
         return _empty_result(
-            settled=settled, message="never enough eligible holdings"
+            settled=False, message="no quarter has any eligible holdings"
         )
-
     schedule = [q for q in grid if start_q <= q < last_q]
+    if not schedule:
+        return _empty_result(settled=False, message="no evaluable holding periods")
 
     # Per-ticker quarterly return series over the full panel range.
     returns = {
@@ -697,7 +712,7 @@ def run_backtest(panel: pd.DataFrame, params: dict) -> BacktestResult:
         "benchmark_total_return": bench / 100.0 - 1.0,
         "portfolio_max_dd": _max_drawdown(series_port),
         "benchmark_max_dd": _max_drawdown(series_bench),
-        "settled": settled,
+        "settled": True,
         "rebalance_quarters": [quarter_from_idx(q) for q in schedule],
     }
     return BacktestResult(series=series, holdings=holdings, stats=stats)

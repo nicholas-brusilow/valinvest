@@ -460,6 +460,64 @@ def count_matching(
 # Backtest
 # --------------------------------------------------------------------------- #
 
+COMPARISON_COLUMNS: tuple[str, ...] = (
+    "quarter",
+    "date",
+    "portfolio_return",
+    "benchmark_return",
+    "difference",
+    "winner",
+)
+WIN_VALUE = "Value portfolio"
+WIN_BENCH = "S&P 500"
+WIN_TIE = "Tie"
+WIN_NA = "n/a"
+TIE_EPSILON = 1e-12
+
+
+def _empty_comparison() -> pd.DataFrame:
+    return pd.DataFrame(columns=list(COMPARISON_COLUMNS))
+
+
+def quarterly_comparison(series: pd.DataFrame) -> pd.DataFrame:
+    """Per-quarter returns of the portfolio vs the benchmark.
+
+    ``series`` is the equity frame from :func:`run_backtest` (``quarter``,
+    ``date``, ``portfolio``, ``benchmark``, rebased to 100 at the start
+    quarter).  Only the first row is synthetic, so the result has
+    ``len(series) - 1`` rows; each row's return is the change of the equity
+    index over the quarter ending in that row's ``quarter``.
+    """
+    if series is None or len(series) < 2:
+        return _empty_comparison()
+    if "portfolio" not in series.columns or "benchmark" not in series.columns:
+        return _empty_comparison()
+
+    port = pd.to_numeric(series["portfolio"], errors="coerce")
+    bench = pd.to_numeric(series["benchmark"], errors="coerce")
+    prev_port = port.shift(1).replace(0.0, np.nan)
+    prev_bench = bench.shift(1).replace(0.0, np.nan)
+    port_ret = (port - prev_port) / prev_port
+    bench_ret = (bench - prev_bench) / prev_bench
+    difference = port_ret - bench_ret
+
+    winners = np.where(
+        port_ret.isna() | bench_ret.isna(),
+        WIN_NA,
+        np.where(difference.abs() < TIE_EPSILON, WIN_TIE,
+                 np.where(difference > 0.0, WIN_VALUE, WIN_BENCH)),
+    )
+    out = pd.DataFrame({
+        "quarter": series["quarter"].to_numpy(),
+        "date": series["date"].to_numpy(),
+        "portfolio_return": port_ret.to_numpy(),
+        "benchmark_return": bench_ret.to_numpy(),
+        "difference": difference.to_numpy(),
+        "winner": winners,
+    })
+    return out.iloc[1:].reset_index(drop=True)[list(COMPARISON_COLUMNS)]
+
+
 FREQ_MODS = {
     "quarterly": frozenset({0, 1, 2, 3}),
     "semiannual": frozenset({1, 3}),
@@ -486,6 +544,7 @@ class BacktestResult:
     series: pd.DataFrame
     holdings: pd.DataFrame
     stats: dict = field(default_factory=dict)
+    comparison: pd.DataFrame = field(default_factory=_empty_comparison)
 
 
 def _empty_result(settled: bool = False, message: str | None = None) -> BacktestResult:
@@ -507,6 +566,14 @@ def _empty_result(settled: bool = False, message: str | None = None) -> Backtest
         "benchmark_max_dd": None,
         "settled": settled,
         "rebalance_quarters": [],
+        "value_win_quarters": 0,
+        "benchmark_win_quarters": 0,
+        "tie_quarters": 0,
+        "comparison_quarters": 0,
+        "portfolio_mean_quarterly_return": None,
+        "benchmark_mean_quarterly_return": None,
+        "portfolio_median_quarterly_return": None,
+        "benchmark_median_quarterly_return": None,
     }
     if message:
         stats["message"] = message
@@ -514,6 +581,7 @@ def _empty_result(settled: bool = False, message: str | None = None) -> Backtest
         series=pd.DataFrame(columns=["quarter", "date", "portfolio", "benchmark"]),
         holdings=pd.DataFrame(columns=_HOLDINGS_OUTPUT_COLUMNS),
         stats=stats,
+        comparison=_empty_comparison(),
     )
 
 
@@ -552,6 +620,13 @@ def _max_drawdown(values: pd.Series) -> float:
     peak = values.cummax()
     dd = values / peak - 1.0
     return float(dd.min())
+
+
+def _finite_or_none(value) -> float | None:
+    """Coerce a pandas scalar to float, returning None for NaN/non-finite."""
+    if pd.isna(value) or not np.isfinite(value):
+        return None
+    return float(value)
 
 
 def _cagr(final: float | None, years: float) -> float | None:
@@ -681,6 +756,11 @@ def run_backtest(panel: pd.DataFrame, params: dict) -> BacktestResult:
             "benchmark": [b for _, b in bench_points],
         }
     )
+    comparison = quarterly_comparison(series)
+    mean_port = _finite_or_none(comparison["portfolio_return"].mean())
+    mean_bench = _finite_or_none(comparison["benchmark_return"].mean())
+    median_port = _finite_or_none(comparison["portfolio_return"].median())
+    median_bench = _finite_or_none(comparison["benchmark_return"].median())
     holdings = pd.DataFrame(holdings_rows, columns=_HOLDINGS_OUTPUT_COLUMNS)
 
     start_date = series["date"].iloc[0]
@@ -692,10 +772,19 @@ def run_backtest(panel: pd.DataFrame, params: dict) -> BacktestResult:
     port_cagr = _cagr(value, years)
     bench_cagr = _cagr(bench, years)
 
+    wins = comparison["winner"].value_counts()
     stats = {
         "start_quarter": quarter_from_idx(start_q),
         "end_quarter": quarter_from_idx(last_q),
         "years": years,
+        "value_win_quarters": int(wins.get(WIN_VALUE, 0)),
+        "benchmark_win_quarters": int(wins.get(WIN_BENCH, 0)),
+        "tie_quarters": int(wins.get(WIN_TIE, 0)),
+        "comparison_quarters": int((comparison["winner"] != WIN_NA).sum()),
+        "portfolio_mean_quarterly_return": mean_port,
+        "benchmark_mean_quarterly_return": mean_bench,
+        "portfolio_median_quarterly_return": median_port,
+        "benchmark_median_quarterly_return": median_bench,
         "n_rebalances": len(schedule),
         "avg_holdings": float(np.mean(holdings_counts)) if holdings_counts else 0.0,
         "min_holdings": int(min(holdings_counts)) if holdings_counts else 0,
@@ -715,4 +804,6 @@ def run_backtest(panel: pd.DataFrame, params: dict) -> BacktestResult:
         "settled": True,
         "rebalance_quarters": [quarter_from_idx(q) for q in schedule],
     }
-    return BacktestResult(series=series, holdings=holdings, stats=stats)
+    return BacktestResult(
+        series=series, holdings=holdings, stats=stats, comparison=comparison
+    )

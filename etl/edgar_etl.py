@@ -31,6 +31,7 @@ from common import (
     copy_csv,
     download,
     env,
+    excluded_tickers,
     get_conn,
     quarter_end,
     setup_logging,
@@ -334,7 +335,10 @@ def _add_tm_row(rows, companies, cik, name, ticker, exchange) -> None:
         companies.setdefault(cik, name)
     edgar = (ticker or "").strip().upper()
     yahoo = _norm_ticker(ticker)
-    if not edgar or not yahoo or yahoo == "NONE-":
+    # Excluded tickers have corrupt vendor price series; see
+    # etl/excluded_tickers.txt.  Keep them out of ticker_map so they are
+    # never re-ingested downstream.
+    if not edgar or not yahoo or yahoo == "NONE-" or yahoo in excluded_tickers():
         return
     rows.append([cik, edgar, yahoo, exchange])
 

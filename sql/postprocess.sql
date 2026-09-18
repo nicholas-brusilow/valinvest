@@ -7,6 +7,9 @@
 --      share count to the quarter-end price_date split basis.
 --  D2: drop ultra-tiny corrupt as-traded prices (< 1e-6), consistent with the
 --      ETL quarter skip rule (1e-6 <= close_as_traded <= 1e7).
+--  D3: purge tickers with corrupt vendor price series (split-adjusted quarterly
+--      close jumps > 100x up or < 1/100 down between quarters); mirrors
+--      etl/excluded_tickers.txt and the ETL filters.
 
 -- -------------------------------------------------------------------------- #
 -- D1 column
@@ -18,6 +21,48 @@ ALTER TABLE shares_quarterly ADD COLUMN IF NOT EXISTS shares_at_price_basis NUME
 -- -------------------------------------------------------------------------- #
 \echo 'price_quarterly rows with close_as_traded < 1e-6 (deleted):'
 DELETE FROM price_quarterly WHERE close_as_traded < 1e-6;
+
+-- -------------------------------------------------------------------------- #
+-- D3: purge tickers with corrupt vendor price series
+-- -------------------------------------------------------------------------- #
+-- A ticker whose split-adjusted quarterly close (price_quarterly.close_raw)
+-- jumps more than 100x up, or less than 1/100 down, between consecutive
+-- quarters is corrupt vendor data and is removed from the dataset entirely.
+-- This is the same authoritative rule stored in etl/excluded_tickers.txt and
+-- enforced by the ETLs.  D3 runs BEFORE D1's shares normalization so that
+-- MIN(ticker_yahoo) per CIK stays stable across runs.
+CREATE TEMP TABLE _excluded_tickers AS
+WITH x AS (
+  SELECT ticker_yahoo, quarter, close_raw,
+         LAG(close_raw) OVER (PARTITION BY ticker_yahoo ORDER BY quarter) AS prev
+  FROM price_quarterly WHERE close_raw IS NOT NULL AND close_raw > 0
+)
+SELECT DISTINCT ticker_yahoo FROM x
+WHERE prev > 0 AND (close_raw / prev > 100 OR close_raw / prev < 0.01);
+
+\echo 'corrupt-price tickers excluded (D3):'
+SELECT count(*) FROM _excluded_tickers;
+
+DELETE FROM dividend        WHERE ticker_yahoo IN (SELECT ticker_yahoo FROM _excluded_tickers);
+DELETE FROM stock_split     WHERE ticker_yahoo IN (SELECT ticker_yahoo FROM _excluded_tickers);
+DELETE FROM price_daily     WHERE ticker_yahoo IN (SELECT ticker_yahoo FROM _excluded_tickers);
+DELETE FROM price_quarterly WHERE ticker_yahoo IN (SELECT ticker_yahoo FROM _excluded_tickers);
+DELETE FROM yahoo_fetch_log WHERE ticker_yahoo IN (SELECT ticker_yahoo FROM _excluded_tickers);
+DELETE FROM ticker_map      WHERE ticker_yahoo IN (SELECT ticker_yahoo FROM _excluded_tickers);
+
+DO $$
+BEGIN
+  IF to_regclass('public.stock_risk_quarter') IS NOT NULL THEN
+    DELETE FROM stock_risk_quarter
+    WHERE ticker_yahoo IN (SELECT ticker_yahoo FROM _excluded_tickers);
+  END IF;
+  IF to_regclass('public.value_panel') IS NOT NULL THEN
+    DELETE FROM value_panel
+    WHERE ticker IN (SELECT ticker_yahoo FROM _excluded_tickers);
+  END IF;
+END $$;
+
+DROP TABLE _excluded_tickers;
 
 -- -------------------------------------------------------------------------- #
 -- D1: normalize shares to the price_date split basis

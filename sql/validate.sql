@@ -188,6 +188,16 @@ WHERE (ticker_yahoo='ADTX' AND quarter='2020Q4')
    OR (ticker_yahoo='NUWE' AND quarter='2016Q1')
    OR (ticker_yahoo='XTIA' AND quarter IN ('2012Q3','2013Q1'));
 
+\echo '=== 19c. Excluded tickers with implausible quarterly price jumps are gone: expect 0 ==='
+WITH x AS (
+  SELECT ticker_yahoo, quarter, close_raw,
+         LAG(close_raw) OVER (PARTITION BY ticker_yahoo ORDER BY quarter) AS prev
+  FROM price_quarterly WHERE close_raw IS NOT NULL AND close_raw > 0
+)
+SELECT ticker_yahoo, quarter, prev, close_raw FROM x
+WHERE prev > 0 AND (close_raw / prev > 100 OR close_raw / prev < 0.01)
+ORDER BY ticker_yahoo, quarter;
+
 \echo '=== 20. No future quarter labels: max(quarter) must not exceed the current calendar quarter ==='
 SELECT max(quarter) AS max_quarter, to_char(now(), 'YYYY"Q"Q') AS current_quarter
 FROM quarterly_fundamentals;

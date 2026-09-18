@@ -6,6 +6,7 @@ All database writes go through COPY (see ``copy_csv``) except for small
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import logging
 import os
 import sys
@@ -28,6 +29,27 @@ DATABASE_URL = env("DATABASE_URL", "postgresql://valinvest:valinvest@db:5432/val
 SEC_USER_AGENT = env("SEC_USER_AGENT", "ValInvest Research research@example.com")
 TICKER_MAP_URL = env("TICKER_MAP_URL", "https://www.sec.gov/files/company_tickers_exchange.json")
 TICKER_MAP_PATH = env("TICKER_MAP_PATH", "data/company_tickers_exchange.json")
+
+EXCLUDED_TICKERS_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "excluded_tickers.txt"
+)
+
+
+@functools.lru_cache(maxsize=1)
+def excluded_tickers() -> frozenset[str]:
+    """Tickers removed from the dataset (corrupt vendor price series).
+
+    See ``etl/excluded_tickers.txt`` for the rule and the current list.
+    """
+    try:
+        with open(EXCLUDED_TICKERS_PATH, "r", encoding="utf-8") as fh:
+            return frozenset(
+                line.strip().upper()
+                for line in fh
+                if line.strip() and not line.lstrip().startswith("#")
+            )
+    except OSError:
+        return frozenset()
 
 
 # --------------------------------------------------------------------------- #

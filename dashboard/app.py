@@ -22,6 +22,7 @@ st.set_page_config(
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import backtest  # noqa: E402 - local module in this directory
+import settings_store  # noqa: E402 - local module in this directory
 
 DB_URL = os.environ.get(
     "DATABASE_URL", "postgresql://valinvest:valinvest@db:5432/valinvest"
@@ -47,6 +48,46 @@ VOL_HELP = (
 )
 START_YEARS = ["Earliest available"] + [str(y) for y in range(2008, 2027)]
 
+SETTINGS_CHOICES = {
+    "freq": tuple(FREQ_LABELS),
+    "vol_filter": tuple(VOL_FILTERS),
+    "start_year": tuple(START_YEARS),
+}
+SETTINGS_BOUNDS = {
+    "pe_range": (0.0, 60.0),
+    "mcap_min": (0.0, None),
+    "mcap_max": (0.0, None),
+    "div_yield": (0.0, 10.0),
+    "min_ret": (-100.0, 0.0),
+}
+SETTINGS_STATUS_KEY = "settings_status"  # non-widget key, never reused by a widget
+
+
+def _on_save_settings() -> None:
+    path = settings_store.settings_path()
+    current = {
+        key: st.session_state.get(key, default)
+        for key, default in settings_store.DEFAULT_SETTINGS.items()
+    }
+    try:
+        settings_store.save_settings(path, current)
+    except OSError as exc:
+        st.session_state[SETTINGS_STATUS_KEY] = ("error", f"Could not save settings: {exc}")
+    else:
+        st.session_state[SETTINGS_STATUS_KEY] = ("success", f"Settings saved to {path}.")
+
+
+def _on_apply_settings() -> None:
+    saved = settings_store.load_settings(settings_store.settings_path())
+    if saved is None:
+        st.session_state[SETTINGS_STATUS_KEY] = ("error", "No saved settings found.")
+        return
+    clean = settings_store.sanitize(saved.settings, choices=SETTINGS_CHOICES, bounds=SETTINGS_BOUNDS)
+    for key, value in clean.items():
+        st.session_state[key] = value   # allowed: callbacks run before widgets are re-instantiated
+    when = f" (saved {saved.saved_at})" if saved.saved_at else ""
+    st.session_state[SETTINGS_STATUS_KEY] = ("success", f"Applied saved screening criteria{when}.")
+
 
 @st.cache_data(show_spinner="Loading fundamentals panel ...")
 def get_panel() -> pd.DataFrame:
@@ -67,6 +108,13 @@ def _fmt_pct(value: float | None) -> str:
 
 def _fmt_dollar(value: float | None) -> str:
     return "n/a" if value is None else f"${value:,.2f}"
+
+
+def _fmt_pct_points(value: float | None, signed: bool = False) -> str:
+    """Format a return as percentage points with 2 decimals ('n/a' if None)."""
+    if value is None:
+        return "n/a"
+    return f"{value * 100:+.2f}" if signed else f"{value * 100:.2f}"
 
 
 # --------------------------------------------------------------------------- #
@@ -94,17 +142,17 @@ with st.sidebar:
         key="pe_range",
     )
 
-    mcap_min = st.number_input(
-        "Min market cap ($B)",
+    mcap_min_m = st.number_input(
+        "Min market cap ($M)",
         min_value=0.0,
-        value=0.5,
-        step=0.5,
+        value=0.0,
+        step=10.0,
         key="mcap_min",
     )
-    mcap_max = st.number_input(
-        "Max market cap ($B)",
+    mcap_max_m = st.number_input(
+        "Max market cap ($M)",
         min_value=0.0,
-        value=500.0,
+        value=100.0,
         step=10.0,
         key="mcap_max",
     )
@@ -147,19 +195,43 @@ with st.sidebar:
 
     log_scale = st.checkbox("Log scale on chart", value=False, key="log_scale")
 
+    st.divider()
+    saved_settings = settings_store.load_settings(settings_store.settings_path())
+    st.button(
+        "Save settings",
+        key="save_settings_btn",
+        on_click=_on_save_settings,
+        width="stretch",
+        help="Persist the current screening criteria and re-apply them later.",
+    )
+    st.button(
+        "Apply saved settings",
+        key="apply_settings_btn",
+        on_click=_on_apply_settings,
+        width="stretch",
+        disabled=saved_settings is None,
+        help="Restore the criteria saved with 'Save settings'.",
+    )
+    status = st.session_state.pop(SETTINGS_STATUS_KEY, None)
+    if status is not None:
+        kind, message = status
+        (st.success if kind == "success" else st.error)(message)
+    if saved_settings is not None and saved_settings.saved_at:
+        st.caption(f"Saved settings: {saved_settings.saved_at}")
+
 
 # --------------------------------------------------------------------------- #
 # Validate inputs
 # --------------------------------------------------------------------------- #
-if mcap_min > mcap_max:
+if mcap_min_m > mcap_max_m:
     st.error("Min market cap must be less than or equal to max market cap.")
     st.stop()
 
 params = {
     "pe_min": float(pe_range[0]),
     "pe_max": float(pe_range[1]),
-    "mcap_min_b": float(mcap_min),
-    "mcap_max_b": float(mcap_max),
+    "mcap_min_b": float(mcap_min_m) / 1000.0,
+    "mcap_max_b": float(mcap_max_m) / 1000.0,
     "min_div_yield": float(div_yield_pct) / 100.0,
     "require_pos_eps4": bool(require_pos_eps4),
     "vol_max": VOL_FILTERS[vol_label],
@@ -277,6 +349,92 @@ fig.update_layout(
 if log_scale:
     fig.update_yaxes(type="log")
 st.plotly_chart(fig, width="stretch")
+
+# --------------------------------------------------------------------------- #
+# Quarterly head-to-head
+# --------------------------------------------------------------------------- #
+st.subheader("Quarterly head-to-head vs S&P 500")
+comparison = result.comparison
+if comparison.empty:
+    st.info("Not enough quarters to compare.")
+else:
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("Value portfolio wins", f"{stats.get('value_win_quarters', 0)} quarters")
+    with c2:
+        st.metric("S&P 500 wins", f"{stats.get('benchmark_win_quarters', 0)} quarters")
+    with c3:
+        st.metric("Ties", f"{stats.get('tie_quarters', 0)} quarters")
+    st.caption(
+        f"{stats.get('comparison_quarters', 0)} quarters compared · "
+        f"{stats['start_quarter']} → {stats['end_quarter']} · returns are the quarterly "
+        "change of each equity index (Value portfolio vs SPY total return)."
+    )
+
+    mean_port = stats.get("portfolio_mean_quarterly_return")
+    mean_bench = stats.get("benchmark_mean_quarterly_return")
+    median_port = stats.get("portfolio_median_quarterly_return")
+    median_bench = stats.get("benchmark_median_quarterly_return")
+
+    summary = pd.DataFrame(
+        {
+            "Statistic": ["Mean quarterly return", "Median quarterly return"],
+            "Value portfolio (%)": [_fmt_pct_points(mean_port), _fmt_pct_points(median_port)],
+            "S&P 500 (%)": [_fmt_pct_points(mean_bench), _fmt_pct_points(median_bench)],
+            "Difference (pp)": [
+                _fmt_pct_points(
+                    None if mean_port is None or mean_bench is None else mean_port - mean_bench,
+                    signed=True,
+                ),
+                _fmt_pct_points(
+                    None if median_port is None or median_bench is None else median_port - median_bench,
+                    signed=True,
+                ),
+            ],
+        }
+    )
+    st.dataframe(summary, hide_index=True, width="stretch")
+    st.caption(
+        "Arithmetic mean and median of the per-quarter returns compared below; "
+        "not annualized (CAGR is shown above)."
+    )
+
+    table = pd.DataFrame(
+        {
+            "Quarter": comparison["quarter"].astype(str).to_numpy(),
+            "Value return (%)": (comparison["portfolio_return"] * 100).round(2).to_numpy(),
+            "S&P 500 return (%)": (comparison["benchmark_return"] * 100).round(2).to_numpy(),
+            "Difference (pp)": (comparison["difference"] * 100).round(2).to_numpy(),
+            "Winner": comparison["winner"].astype(str).to_numpy(),
+        }
+    )
+    st.dataframe(table, hide_index=True, width="stretch")
+
+    winner_colors = {
+        backtest.WIN_VALUE: "#1f77b4",
+        backtest.WIN_BENCH: "#636363",
+        backtest.WIN_TIE: "#bcbd22",
+        backtest.WIN_NA: "#d9d9d9",
+    }
+    customdata = (comparison[["portfolio_return", "benchmark_return"]] * 100).round(2).to_numpy()
+    bar = go.Figure(
+        go.Bar(
+            x=comparison["date"],
+            y=comparison["difference"] * 100,
+            marker_color=[winner_colors.get(w, "#d9d9d9") for w in comparison["winner"]],
+            customdata=customdata,
+            hovertemplate=(
+                "%{x|%Y-%m-%d}<br>Difference: %{y:.2f} pp<br>"
+                "Value: %{customdata[0]:.2f}% · S&P 500: %{customdata[1]:.2f}%<extra></extra>"
+            ),
+        )
+    )
+    bar.add_hline(y=0.0, line_color="#888888", line_width=1)
+    bar.update_layout(
+        yaxis_title="Value − S&P 500 (pp)",
+        margin=dict(l=10, r=10, t=40, b=10),
+    )
+    st.plotly_chart(bar, width="stretch")
 
 # --------------------------------------------------------------------------- #
 # Latest holdings

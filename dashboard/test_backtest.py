@@ -606,6 +606,164 @@ def test_single_point_guard():
 
 
 # --------------------------------------------------------------------------- #
+# 20. quarterly_comparison returns / winners
+# --------------------------------------------------------------------------- #
+
+
+def equity_series(quarters: list[str], port: list[float], bench: list[float]) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "quarter": quarters,
+            "date": [backtest._quarter_end(backtest.qidx(q)) for q in quarters],
+            "portfolio": port,
+            "benchmark": bench,
+        }
+    )
+
+
+def test_quarterly_comparison_returns():
+    series = equity_series(
+        ["2020Q1", "2020Q2", "2020Q3"], [100.0, 110.0, 99.0], [100.0, 105.0, 105.0]
+    )
+    comp = backtest.quarterly_comparison(series)
+    assert list(comp.columns) == list(backtest.COMPARISON_COLUMNS), comp.columns.tolist()
+    assert len(comp) == 2, comp
+    assert comp["quarter"].tolist() == ["2020Q2", "2020Q3"], comp["quarter"].tolist()
+    assert approx(comp["portfolio_return"].iloc[0], 0.10), comp
+    assert approx(comp["portfolio_return"].iloc[1], -0.10), comp
+    assert approx(comp["benchmark_return"].iloc[0], 0.05), comp
+    assert approx(comp["benchmark_return"].iloc[1], 0.00), comp
+    assert approx(comp["difference"].iloc[0], 0.05), comp
+    assert approx(comp["difference"].iloc[1], -0.10), comp
+    assert comp["winner"].tolist() == [backtest.WIN_VALUE, backtest.WIN_BENCH], comp[
+        "winner"
+    ].tolist()
+
+
+# --------------------------------------------------------------------------- #
+# 21. quarterly_comparison ties and zero benchmark returns
+# --------------------------------------------------------------------------- #
+
+
+def test_quarterly_comparison_ties():
+    series = equity_series(
+        ["2020Q1", "2020Q2", "2020Q3"], [100.0, 110.0, 132.0], [100.0, 110.0, 121.0]
+    )
+    comp = backtest.quarterly_comparison(series)
+    assert comp["winner"].tolist() == [backtest.WIN_TIE, backtest.WIN_VALUE], comp[
+        "winner"
+    ].tolist()
+
+    flat = equity_series(
+        ["2020Q1", "2020Q2", "2020Q3"], [100.0, 110.0, 99.0], [100.0, 100.0, 100.0]
+    )
+    comp = backtest.quarterly_comparison(flat)
+    assert approx(comp["benchmark_return"].iloc[0], 0.0), comp["benchmark_return"].iloc[0]
+    assert not pd.isna(comp["benchmark_return"].iloc[0]), comp["benchmark_return"].iloc[0]
+    assert comp["winner"].iloc[1] == backtest.WIN_BENCH, comp["winner"].iloc[1]
+
+
+# --------------------------------------------------------------------------- #
+# 22. quarterly_comparison guards
+# --------------------------------------------------------------------------- #
+
+
+def test_quarterly_comparison_empty_guard():
+    empty = backtest.quarterly_comparison(pd.DataFrame())
+    assert empty.empty, empty
+    assert list(empty.columns) == list(backtest.COMPARISON_COLUMNS), empty.columns.tolist()
+
+    single = backtest.quarterly_comparison(
+        equity_series(["2020Q1"], [100.0], [100.0])
+    )
+    assert single.empty, single
+    assert list(single.columns) == list(backtest.COMPARISON_COLUMNS), single.columns.tolist()
+
+    zero_prev = backtest.quarterly_comparison(
+        equity_series(["2020Q1", "2020Q2", "2020Q3"], [100.0, 0.0, 50.0], [100.0, 100.0, 100.0])
+    )
+    diffs = zero_prev["difference"].dropna()
+    assert not np.isinf(diffs).any(), diffs.tolist()
+    assert zero_prev["winner"].iloc[-1] == backtest.WIN_NA, zero_prev["winner"].iloc[-1]
+
+
+# --------------------------------------------------------------------------- #
+# 23. run_backtest populates comparison + win stats
+# --------------------------------------------------------------------------- #
+
+
+def test_quarterly_comparison_stats():
+    quarters = ["2020Q1", "2020Q2", "2020Q3"]
+    aaa_px = {"2020Q1": 100.0, "2020Q2": 110.0, "2020Q3": 99.0}
+    spy_px = {"2020Q1": 100.0, "2020Q2": 105.0, "2020Q3": 105.0}
+    rows = []
+    for q in quarters:
+        rows.append(make_row("AAA", q, aaa_px[q], pe=5.0))
+        rows.append(make_row("SPY", q, spy_px[q], pe=np.nan))
+    result = backtest.run_backtest(
+        panel(rows), {"pe_min": 0.0, "pe_max": 15.0, "freq": "quarterly"}
+    )
+    assert list(result.comparison.columns) == list(backtest.COMPARISON_COLUMNS), result.comparison.columns.tolist()
+    assert len(result.comparison) == 2, result.comparison
+    assert result.comparison["quarter"].tolist() == ["2020Q2", "2020Q3"], result.comparison[
+        "quarter"
+    ].tolist()
+    assert result.stats["value_win_quarters"] == 1, result.stats
+    assert result.stats["benchmark_win_quarters"] == 1, result.stats
+    assert result.stats["tie_quarters"] == 0, result.stats
+    assert result.stats["comparison_quarters"] == 2, result.stats
+    assert approx(result.stats["portfolio_mean_quarterly_return"], 0.0), result.stats
+    assert approx(result.stats["portfolio_median_quarterly_return"], 0.0), result.stats
+    assert approx(result.stats["benchmark_mean_quarterly_return"], 0.025), result.stats
+    assert approx(result.stats["benchmark_median_quarterly_return"], 0.025), result.stats
+
+    # Second run where mean != median, proving the two statistics are wired to
+    # the right computation.
+    quarters2 = ["2021Q1", "2021Q2", "2021Q3", "2021Q4"]
+    aaa_px2 = {"2021Q1": 100.0, "2021Q2": 110.0, "2021Q3": 99.0, "2021Q4": 108.9}
+    spy_px2 = {"2021Q1": 100.0, "2021Q2": 105.0, "2021Q3": 105.0, "2021Q4": 110.25}
+    rows2 = []
+    for q in quarters2:
+        rows2.append(make_row("AAA", q, aaa_px2[q], pe=5.0))
+        rows2.append(make_row("SPY", q, spy_px2[q], pe=np.nan))
+    result2 = backtest.run_backtest(
+        panel(rows2), {"pe_min": 0.0, "pe_max": 15.0, "freq": "quarterly"}
+    )
+    assert result2.stats["value_win_quarters"] == 2, result2.stats
+    assert result2.stats["benchmark_win_quarters"] == 1, result2.stats
+    assert result2.stats["comparison_quarters"] == 3, result2.stats
+    assert approx(result2.stats["portfolio_mean_quarterly_return"], 0.1 / 3), result2.stats
+    assert approx(result2.stats["portfolio_median_quarterly_return"], 0.10), result2.stats
+    assert approx(result2.stats["benchmark_mean_quarterly_return"], 0.1 / 3), result2.stats
+    assert approx(result2.stats["benchmark_median_quarterly_return"], 0.05), result2.stats
+
+
+# --------------------------------------------------------------------------- #
+# 24. empty result comparison schema
+# --------------------------------------------------------------------------- #
+
+
+def test_empty_result_comparison_schema():
+    result = backtest._empty_result()
+    assert list(result.comparison.columns) == list(backtest.COMPARISON_COLUMNS), result.comparison.columns.tolist()
+    assert result.comparison.empty, result.comparison
+    for key in (
+        "value_win_quarters",
+        "benchmark_win_quarters",
+        "tie_quarters",
+        "comparison_quarters",
+    ):
+        assert result.stats[key] == 0, (key, result.stats)
+    for key in (
+        "portfolio_mean_quarterly_return",
+        "benchmark_mean_quarterly_return",
+        "portfolio_median_quarterly_return",
+        "benchmark_median_quarterly_return",
+    ):
+        assert result.stats[key] is None, (key, result.stats)
+
+
+# --------------------------------------------------------------------------- #
 
 TESTS = [
     ("price_only_return", test_price_only_return),
@@ -627,6 +785,11 @@ TESTS = [
     ("start_quarter_first_eligible", test_start_quarter_first_eligible),
     ("no_eligible_returns_unsettled", test_no_eligible_returns_unsettled),
     ("single_point_guard", test_single_point_guard),
+    ("quarterly_comparison_returns", test_quarterly_comparison_returns),
+    ("quarterly_comparison_ties", test_quarterly_comparison_ties),
+    ("quarterly_comparison_empty_guard", test_quarterly_comparison_empty_guard),
+    ("quarterly_comparison_stats", test_quarterly_comparison_stats),
+    ("empty_result_comparison_schema", test_empty_result_comparison_schema),
 ]
 
 

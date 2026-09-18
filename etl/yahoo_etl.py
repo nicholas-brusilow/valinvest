@@ -32,6 +32,7 @@ from common import (
     copy_csv,
     download,
     env,
+    excluded_tickers,
     get_conn,
     quarter_label,
     setup_logging,
@@ -303,40 +304,50 @@ def fetch_one(sym: str, limiter: RateLimiter, retries: int = 4) -> dict:
 # --------------------------------------------------------------------------- #
 def get_universe(tickers_arg: str, conn, logger) -> list:
     if tickers_arg:
-        return sorted({_norm_ticker(t) for t in tickers_arg.split(",") if _norm_ticker(t)})
-
-    tickers = None
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT DISTINCT ticker_yahoo FROM ticker_map WHERE ticker_yahoo IS NOT NULL")
-            rows = [r[0] for r in cur.fetchall()]
-        if rows:
-            tickers = rows
-            logger.info("universe from ticker_map: %d tickers", len(tickers))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("ticker_map unavailable (%s); falling back to JSON", exc)
+        tickers = [_norm_ticker(t) for t in tickers_arg.split(",") if _norm_ticker(t)]
+        logger.info("universe from --tickers: %d tickers", len(tickers))
+    else:
+        tickers = None
         try:
-            conn.rollback()
-        except Exception:
-            pass
+            with conn.cursor() as cur:
+                cur.execute("SELECT DISTINCT ticker_yahoo FROM ticker_map WHERE ticker_yahoo IS NOT NULL")
+                rows = [r[0] for r in cur.fetchall()]
+            if rows:
+                tickers = rows
+                logger.info("universe from ticker_map: %d tickers", len(tickers))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ticker_map unavailable (%s); falling back to JSON", exc)
+            try:
+                conn.rollback()
+            except Exception:
+                pass
 
-    if tickers is None:
-        if not os.path.exists(TICKER_MAP_PATH) or os.path.getsize(TICKER_MAP_PATH) == 0:
-            download(TICKER_MAP_URL, TICKER_MAP_PATH, logger=logger)
-        with open(TICKER_MAP_PATH, "r", encoding="utf-8") as fh:
-            obj = json.load(fh)
-        fields = obj.get("fields") or []
-        data = obj.get("data") or []
-        ti = fields.index("ticker") if "ticker" in fields else 2
-        tickers = []
-        for rec in data:
-            if isinstance(rec, (list, tuple)) and len(rec) > ti:
-                tickers.append(_norm_ticker(rec[ti]))
-            elif isinstance(rec, dict):
-                tickers.append(_norm_ticker(rec.get("ticker", "")))
-        logger.info("universe from JSON: %d tickers", len(tickers))
+        if tickers is None:
+            if not os.path.exists(TICKER_MAP_PATH) or os.path.getsize(TICKER_MAP_PATH) == 0:
+                download(TICKER_MAP_URL, TICKER_MAP_PATH, logger=logger)
+            with open(TICKER_MAP_PATH, "r", encoding="utf-8") as fh:
+                obj = json.load(fh)
+            fields = obj.get("fields") or []
+            data = obj.get("data") or []
+            ti = fields.index("ticker") if "ticker" in fields else 2
+            tickers = []
+            for rec in data:
+                if isinstance(rec, (list, tuple)) and len(rec) > ti:
+                    tickers.append(_norm_ticker(rec[ti]))
+                elif isinstance(rec, dict):
+                    tickers.append(_norm_ticker(rec.get("ticker", "")))
+            logger.info("universe from JSON: %d tickers", len(tickers))
 
-    return sorted({t for t in tickers if t and t != "NONE-"})
+    # Drop NONE- and excluded tickers (corrupt vendor price series; see
+    # etl/excluded_tickers.txt) so they are never fetched again.
+    candidates = {t for t in tickers if t and t != "NONE-"}
+    dropped = sorted(candidates & excluded_tickers())
+    if dropped:
+        logger.warning(
+            "universe: dropping %d excluded ticker(s) with corrupt price history: %s",
+            len(dropped), ", ".join(dropped),
+        )
+    return sorted(candidates - excluded_tickers())
 
 
 def get_done(conn, logger) -> set:
